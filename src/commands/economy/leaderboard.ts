@@ -1,0 +1,131 @@
+import { SlashCommandBuilder, ChatInputCommandInteraction, GuildMember } from 'discord.js';
+import { EmbedBuilderService } from '../../utils/embedBuilder';
+import { Command } from '../../interfaces/command';
+import { COLORS } from '../../utils/constants';
+import User from '../../models/User';
+
+export = {
+  data: new SlashCommandBuilder()
+    .setName('leaderboard')
+    .setDescription('View the richest users on the server')
+    .addIntegerOption(option => 
+      option
+        .setName('limit')
+        .setDescription('How many users to show (default: 10)')
+        .setMinValue(1)
+        .setMaxValue(25)
+        .setRequired(false)
+    ),
+  
+  async execute(interaction: ChatInputCommandInteraction) {
+    await interaction.deferReply();
+    
+    try {
+      const limit = interaction.options.getInteger('limit') || 10;
+      
+      if (!interaction.guild) {
+        return interaction.editReply({
+          embeds: [EmbedBuilderService.error('This command can only be used in a server.')]
+        });
+      }
+      
+      // Find top users by total money (wallet + bank)
+      const topUsers = await User.aggregate([
+        {
+          $addFields: {
+            totalMoney: { $add: ['$wallet', '$bank'] }
+          }
+        },
+        { $sort: { totalMoney: -1 } },
+        { $limit: limit }
+      ]);
+      
+      if (topUsers.length === 0) {
+        return interaction.editReply({
+          embeds: [EmbedBuilderService.info('No users have any money yet.')]
+        });
+      }
+      
+      // Fetch discord usernames for the top users
+      let leaderboardText = '';
+      let rank = 1;
+      
+      for (const userData of topUsers) {
+        try {
+          // Try to get member from guild
+          const member = await interaction.guild.members.fetch(userData.userId).catch(() => null);
+          const username = member ? member.user.username : 'Unknown User';
+          
+          // Format money
+          const total = userData.totalMoney;
+          const wallet = userData.wallet;
+          const bank = userData.bank;
+          
+          // Medal emojis for top 3
+          let medal = '';
+          if (rank === 1) medal = '🥇 ';
+          else if (rank === 2) medal = '🥈 ';
+          else if (rank === 3) medal = '🥉 ';
+          else medal = `#${rank} `;
+          
+          leaderboardText += `${medal}**${username}** - $${total.toLocaleString()} (💰 ${wallet.toLocaleString()} | 🏦 ${bank.toLocaleString()})\n`;
+          rank++;
+        } catch (err) {
+          console.error(`Error fetching user ${userData.userId}:`, err);
+        }
+      }
+      
+      // Create leaderboard embed
+      const leaderboardEmbed = EmbedBuilderService.createEmbed()
+        .setColor(COLORS.INFO)
+        .setTitle('💰 Economy Leaderboard')
+        .setDescription(leaderboardText || 'No data available')
+        .setFooter({ text: `Top ${limit} richest users` })
+        .setTimestamp();
+      
+      // Try to find the requesting user's position if not in top
+      const requestingUserId = interaction.user.id;
+      const userInTop = topUsers.some(u => u.userId === requestingUserId);
+      
+      if (!userInTop) {
+        // Find the user's rank if they are not in the top
+        const userCount = await User.countDocuments({
+          totalMoney: { $gt: 0 }
+        });
+        
+        const userDoc = await User.findOne({ userId: requestingUserId });
+        
+        if (userDoc) {
+          const userRank = await User.countDocuments({
+            $or: [
+              { totalMoney: { $gt: userDoc.wallet + userDoc.bank } },
+              { 
+                totalMoney: { $eq: userDoc.wallet + userDoc.bank },
+                userId: { $lt: requestingUserId }
+              }
+            ]
+          }) + 1;
+          
+          const totalMoney = userDoc.wallet + userDoc.bank;
+          
+          if (userRank <= userCount) {
+            leaderboardEmbed.addFields({
+              name: 'Your Position',
+              value: `You are ranked #${userRank} with $${totalMoney.toLocaleString()}`
+            });
+          }
+        }
+      }
+      
+      return interaction.editReply({ embeds: [leaderboardEmbed] });
+    } catch (error) {
+      console.error('Error getting leaderboard:', error);
+      return interaction.editReply({ 
+        embeds: [EmbedBuilderService.error('An error occurred while fetching the leaderboard. Please try again later.')]
+      });
+    }
+  },
+  
+  category: 'economy',
+  cooldown: 10, // 10 seconds cooldown
+} as Command; 
