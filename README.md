@@ -1,4 +1,4 @@
- # Synix Bot
+  # Synix Bot
 
 ## Features
 
